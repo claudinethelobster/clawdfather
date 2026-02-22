@@ -4,6 +4,9 @@ import { join, extname } from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { sessionStore } from "./sessions";
 import type { ClawdfatherConfig } from "./types";
+import { createApiRouter } from "./api-routes";
+
+const apiRouter = createApiRouter();
 
 const MIME: Record<string, string> = {
   ".html": "text/html",
@@ -104,8 +107,9 @@ export function startWebServer(
       res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
       res.setHeader("Vary", "Origin");
     }
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -114,6 +118,18 @@ export function startWebServer(
     }
 
     const url = req.url ?? "/";
+
+    // API v1 routes handled by the router
+    if (url.startsWith("/api/v1/")) {
+      apiRouter.handle(req, res).catch((err: any) => {
+        console.error(`[clawdfather] API error: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "internal", message: "Internal server error" } }));
+        }
+      });
+      return;
+    }
 
     // API: version
     if (url === "/api/version") {

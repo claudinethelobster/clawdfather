@@ -39,4 +39,8 @@ export interface ClawdfatherConfig {
   hostKeyPath?: string;
   /** Allowed CORS origins. Empty/undefined = same-origin only. ["*"] = permissive. */
   allowedOrigins?: string[];
+  masterKey?: string;
+  githubClientId?: string;
+  githubClientSecret?: string;
+  dbUrl?: string;
 }
