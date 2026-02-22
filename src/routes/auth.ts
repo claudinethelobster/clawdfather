@@ -178,7 +178,7 @@ export async function handleOAuthCallback(req: IncomingMessage, res: ServerRespo
        login = EXCLUDED.login, display_name = EXCLUDED.display_name,
        email = EXCLUDED.email, avatar_url = EXCLUDED.avatar_url, updated_at = NOW()
      RETURNING id, github_id, login, display_name, email, avatar_url`,
-    [githubId, ghUser.login, ghUser.name ?? null, email, ghUser.avatar_url ?? null],
+    [githubId, ghUser.login, ghUser.name ?? ghUser.login, email, ghUser.avatar_url ?? null],
   );
   const account = upsertResult.rows[0];
 
