@@ -2,145 +2,73 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clawdfather — Server Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0d0d0d">
+  <title>Clawdfather</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
 </head>
 <body>
-  <div id="app">
-    <!-- Header -->
-    <div class="header">
-      <div class="header-left">
+  <!-- Auth screen -->
+  <div id="screen-auth" class="screen screen-auth" hidden>
+    <div class="auth-content">
+      <div class="auth-logo">🦞</div>
+      <h1 class="auth-title">CLAWDFATHER</h1>
+      <p class="auth-subtitle">AI-powered server administration</p>
+      <button id="btn-login" class="btn-github" onclick="app.login()">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+          <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
+        </svg>
+        Sign in with GitHub
+      </button>
+      <div id="auth-error" class="auth-error" hidden></div>
+    </div>
+  </div>
+
+  <!-- Chat screen -->
+  <div id="screen-chat" class="screen screen-chat" hidden>
+    <header id="chat-header" class="chat-header">
+      <div class="header-brand">
         <span class="logo">🦞</span>
-        <div>
-          <div class="header-title">CLAWDFATHER</div>
-          <div class="header-subtitle">AI Server Admin · <span id="version-display"></span></div>
+        <div class="brand-text">
+          <div class="brand-name">CLAWDFATHER</div>
+          <div id="session-indicator" class="session-indicator">No active session</div>
         </div>
       </div>
-      <div class="header-right">
-        <span id="connection-hint" class="connection-hint"></span>
-        <div id="status-badge" class="status-badge disconnected">
-          <span class="status-dot"></span>
-          <span id="status-text">disconnected</span>
-        </div>
+      <div class="header-actions">
+        <button id="btn-end-session" class="btn-icon btn-end" title="End session" hidden onclick="app.endSession()">✕</button>
+        <button id="btn-user-menu" class="btn-icon btn-avatar" title="Account" onclick="app.toggleMenu()"></button>
       </div>
-    </div>
+    </header>
 
-    <!-- Server info bar (hidden until connected) -->
-    <div id="server-info" class="server-info" style="display: none;">
-      <span><span class="label">target:</span> <span class="value" id="target-display">—</span></span>
-      <span><span class="label">session:</span> <span class="value" id="session-display">—</span></span>
-    </div>
+    <div id="chat-thread" class="chat-thread" aria-live="polite" aria-label="Chat messages"></div>
 
-    <!-- Welcome screen (shown when no session) -->
-    <div id="welcome" class="welcome">
-      <div class="welcome-logo">🦞</div>
-      <h2>Welcome to Clawdfather</h2>
-      <p>Connect via SSH to start an AI-powered admin session.</p>
-      <!-- OS Tabs -->
-      <div class="os-tabs">
-        <button class="os-tab active" data-tab="unix">macOS / Linux</button>
-        <button class="os-tab" data-tab="windows">Windows</button>
-      </div>
-
-      <!-- macOS / Linux steps (existing, unchanged) -->
-      <div class="welcome-steps" id="tab-unix">
-        <div class="welcome-step-block">
-          <div class="step-num">1</div>
-          <div class="step-content">
-            <div class="step-title">Check if your SSH key is already loaded</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add -l</code>
-              <button class="step-copy-btn" data-cmd="ssh-add -l" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">If you see a key fingerprint, skip to step 3.</div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">2</div>
-          <div class="step-content">
-            <div class="step-title">Load your SSH key</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add ~/.ssh/id_ed25519</code>
-              <button class="step-copy-btn" data-cmd="ssh-add ~/.ssh/id_ed25519" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">Common key paths: <code>~/.ssh/id_ed25519</code> · <code>~/.ssh/id_rsa</code> · <code>~/.ssh/id_ecdsa</code></div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">3</div>
-          <div class="step-content">
-            <div class="step-title">Connect with agent forwarding</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh -A clawdfather.ai</code>
-              <button class="step-copy-btn" data-cmd="ssh -A clawdfather.ai" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">The <code>-A</code> flag forwards your SSH agent — required so Clawdfather can authenticate to your target servers.</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Windows steps (new) -->
-      <div class="welcome-steps" id="tab-windows" style="display:none;">
-        <div class="welcome-step-block">
-          <div class="step-num">1</div>
-          <div class="step-content">
-            <div class="step-title">Enable and start the SSH Agent service (run as Administrator)</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">Set-Service -Name ssh-agent -StartupType Automatic; Start-Service ssh-agent</code>
-              <button class="step-copy-btn" data-cmd="Set-Service -Name ssh-agent -StartupType Automatic; Start-Service ssh-agent" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">Open PowerShell as Administrator to run this command.</div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">2</div>
-          <div class="step-content">
-            <div class="step-title">Check if your SSH key is already loaded</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add -l</code>
-              <button class="step-copy-btn" data-cmd="ssh-add -l" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">If you see a key fingerprint, skip to step 4.</div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">3</div>
-          <div class="step-content">
-            <div class="step-title">Load your SSH key</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add $env:USERPROFILE\.ssh\id_ed25519</code>
-              <button class="step-copy-btn" data-cmd="ssh-add $env:USERPROFILE\.ssh\id_ed25519" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">Common key paths: <code>$env:USERPROFILE\.ssh\id_ed25519</code> · <code>$env:USERPROFILE\.ssh\id_rsa</code></div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">4</div>
-          <div class="step-content">
-            <div class="step-title">Connect with agent forwarding</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh -A clawdfather.ai</code>
-              <button class="step-copy-btn" data-cmd="ssh -A clawdfather.ai" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">The <code>-A</code> flag forwards your SSH agent — required so Clawdfather can authenticate to your target servers.</div>
-          </div>
-        </div>
+    <div class="chat-input-area">
+      <div class="chat-input-row">
+        <textarea id="chat-input" class="chat-input" rows="1" placeholder="Message Clawdfather..." aria-label="Message input" disabled></textarea>
+        <button id="btn-send" class="btn-send" aria-label="Send" disabled>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
       </div>
     </div>
+  </div>
 
-    <!-- Messages (hidden until session active) -->
-    <div id="messages" class="messages" style="display: none;"></div>
-
-    <!-- Input area (hidden until session active) -->
-    <div id="input-area" class="input-area" style="display: none;">
-      <div class="input-row">
-        <textarea id="message-input" rows="1" placeholder="Ask me to manage your server..." autofocus></textarea>
-        <button id="send-btn">Send</button>
+  <!-- Account dropdown menu -->
+  <div id="account-menu" class="account-menu" hidden>
+    <div class="account-menu-header">
+      <div id="menu-avatar" class="avatar-md"></div>
+      <div>
+        <div id="menu-name" class="menu-name"></div>
+        <div id="menu-login" class="menu-login"></div>
       </div>
-      <div class="input-hint">Enter to send · Shift+Enter for newline</div>
     </div>
+    <hr class="menu-divider">
+    <button class="menu-item" onclick="app.showPublicKey()">🔑 Show my public key</button>
+    <button class="menu-item menu-item-danger" onclick="app.logout()">Sign out</button>
   </div>
 
   <script src="app.js"></script>

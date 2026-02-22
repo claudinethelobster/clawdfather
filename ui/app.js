@@ -1,442 +1,715 @@
 /**
- * Clawdfather Web UI — Client-side application
+ * Clawdfather — Session-First Chat UI
  *
- * Connects to the Clawdfather plugin WebSocket server (not the OpenClaw Gateway).
- * Uses a simple JSON protocol for auth, chat messages, and status updates.
+ * State machine:
+ *   AUTH → LOADING → GREETING → COLLECT_TARGET → PROBING →
+ *     → NEEDS_INSTALL → CONFIRMING → ACTIVE_SESSION
+ *     → BLOCKED → COLLECT_TARGET (retry)
+ *     → READY → STARTING → ACTIVE_SESSION
  */
 
-(function () {
-  "use strict";
+const app = {
+  state: 'AUTH',
+  account: null,
+  sessionId: null,
+  connectionId: null,
+  targetHost: null,
+  targetUser: null,
+  targetPort: null,
+  ws: null,
+  _menuOverlay: null,
 
-  // ── DOM Elements ──────────────────────────────────────────────────
-  const $messages = document.getElementById("messages");
-  const $input = document.getElementById("message-input");
-  const $sendBtn = document.getElementById("send-btn");
-  const $statusBadge = document.getElementById("status-badge");
-  const $statusText = document.getElementById("status-text");
-  const $serverInfo = document.getElementById("server-info");
-  const $targetDisplay = document.getElementById("target-display");
-  const $sessionDisplay = document.getElementById("session-display");
-  const $welcome = document.getElementById("welcome");
-  const $inputArea = document.getElementById("input-area");
-  const $connectionHint = document.getElementById("connection-hint");
+  // ── DOM refs ───────────────────────────────────────────────────
+  $: {
+    screenAuth: () => document.getElementById('screen-auth'),
+    screenChat: () => document.getElementById('screen-chat'),
+    authError: () => document.getElementById('auth-error'),
+    thread: () => document.getElementById('chat-thread'),
+    input: () => document.getElementById('chat-input'),
+    btnSend: () => document.getElementById('btn-send'),
+    btnEnd: () => document.getElementById('btn-end-session'),
+    btnAvatar: () => document.getElementById('btn-user-menu'),
+    sessionIndicator: () => document.getElementById('session-indicator'),
+    accountMenu: () => document.getElementById('account-menu'),
+    menuAvatar: () => document.getElementById('menu-avatar'),
+    menuName: () => document.getElementById('menu-name'),
+    menuLogin: () => document.getElementById('menu-login'),
+  },
 
-  // ── State ─────────────────────────────────────────────────────────
-  let ws = null;
-  let sessionId = null;
-  let serverTarget = null;
-  let isThinking = false;
-  let reconnectTimer = null;
-  let reconnectDelay = 1000;
-  let authenticated = false;
-  let bootstrapSent = false;
-  let leaseEnded = false;
+  // ── Init ───────────────────────────────────────────────────────
 
-  // ── Welcome copy buttons ──────────────────────────────────────────
-  function initWelcomeCopyButtons() {
-    document.querySelectorAll(".step-copy-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var cmd = btn.getAttribute("data-cmd");
-        if (!cmd) return;
-        navigator.clipboard.writeText(cmd).then(function () {
-          btn.textContent = "copied!";
-          btn.classList.add("copied");
-          setTimeout(function () {
-            btn.textContent = "copy";
-            btn.classList.remove("copied");
-          }, 1500);
-        }).catch(function () {
-          var row = btn.closest(".step-cmd-row");
-          var codeEl = row && row.querySelector(".step-cmd");
-          if (codeEl) {
-            var range = document.createRange();
-            range.selectNodeContents(codeEl);
-            var sel = window.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
-          }
-        });
-      });
+  async init() {
+    this.bindInput();
+    this.setState('LOADING');
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('session_established')) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+
+    await this.checkAuth();
+  },
+
+  bindInput() {
+    const input = this.$.input();
+    const btnSend = this.$.btnSend();
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        this.onSend();
+      }
     });
-  }
 
-  // ── OS tab switching ────────────────────────────────────────────
-  function initOsTabs() {
-    document.querySelectorAll(".os-tab").forEach(function(tab) {
-      tab.addEventListener("click", function() {
-        document.querySelectorAll(".os-tab").forEach(function(t) {
-          t.classList.remove("active");
-        });
-        tab.classList.add("active");
-
-        var target = tab.getAttribute("data-tab");
-        document.getElementById("tab-unix").style.display = target === "unix" ? "flex" : "none";
-        document.getElementById("tab-windows").style.display = target === "windows" ? "flex" : "none";
-      });
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     });
-  }
 
-  // ── Init ──────────────────────────────────────────────────────────
-  function init() {
-    initWelcomeCopyButtons();
-    initOsTabs();
+    btnSend.addEventListener('click', () => this.onSend());
+  },
 
-    // Extract session from URL hash then immediately scrub it
-    const hash = window.location.hash.slice(1);
-    const params = new URLSearchParams(hash);
-    sessionId = params.get("session");
+  onSend() {
+    const input = this.$.input();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    input.style.height = 'auto';
+    this.sendMessage(text);
+  },
 
-    if (sessionId) {
-      // Remove the token from URL and browser history so it isn't leaked
-      // via Referer headers, browser history, or shoulder-surfing.
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-      } else {
-        window.location.hash = "";
+  // ── Auth ───────────────────────────────────────────────────────
+
+  async checkAuth() {
+    try {
+      const res = await this.api('GET', '/api/v1/auth/me');
+      if (res.ok) {
+        this.account = res.data.account;
+        this.showChatScreen();
+        await this.tryRestoreSession();
+        if (this.state !== 'ACTIVE_SESSION') {
+          this.setState('GREETING');
+          this.greetUser();
+        }
+        return;
+      }
+    } catch {}
+    this.setState('AUTH');
+    this.$.screenAuth().hidden = false;
+    this.$.screenChat().hidden = true;
+  },
+
+  login() {
+    window.location.href = '/api/v1/auth/oauth/github/start';
+  },
+
+  async logout() {
+    this.closeMenu();
+    try {
+      await this.api('DELETE', '/api/v1/auth/session');
+    } catch {}
+    this.account = null;
+    this.sessionId = null;
+    this.connectionId = null;
+    if (this.ws) { this.ws.close(); this.ws = null; }
+    this.$.screenChat().hidden = true;
+    this.$.screenAuth().hidden = false;
+    this.setState('AUTH');
+  },
+
+  // ── Screen management ──────────────────────────────────────────
+
+  showChatScreen() {
+    this.$.screenAuth().hidden = true;
+    this.$.screenChat().hidden = false;
+    if (this.account) {
+      const avatar = this.$.btnAvatar();
+      if (this.account.avatar_url) {
+        avatar.style.backgroundImage = 'url(' + this.account.avatar_url + ')';
       }
     }
+  },
 
-    // Fetch version info
-    fetch("/api/version").then(function(r) { return r.json(); }).then(function(v) {
-      var el = document.getElementById("version-display");
-      if (el) el.textContent = "v" + v.version + " (" + v.commit + ")";
-    }).catch(function() {});
+  // ── State machine ──────────────────────────────────────────────
 
-    if (!sessionId) {
-      showWelcome();
-      return;
+  setState(newState) {
+    this.state = newState;
+    const input = this.$.input();
+    const btnSend = this.$.btnSend();
+    const btnEnd = this.$.btnEnd();
+
+    const inputActive = ['GREETING', 'COLLECT_TARGET', 'NEEDS_INSTALL', 'BLOCKED', 'ACTIVE_SESSION', 'SESSION_ENDED'].includes(newState);
+    input.disabled = !inputActive;
+    btnSend.disabled = !inputActive;
+
+    if (inputActive && newState !== 'SESSION_ENDED') {
+      input.focus();
     }
 
-    showChat();
-    $sessionDisplay.textContent = sessionId.slice(0, 8) + "...";
-    addSystemMessage("Connecting...");
-    connect();
-  }
+    btnEnd.hidden = newState !== 'ACTIVE_SESSION';
+    this.updateSessionIndicator();
+  },
 
-  // ── UI State ──────────────────────────────────────────────────────
-  function showWelcome() {
-    $welcome.style.display = "flex";
-    $messages.style.display = "none";
-    $inputArea.style.display = "none";
-    $serverInfo.style.display = "none";
-  }
-
-  function showChat() {
-    $welcome.style.display = "none";
-    $messages.style.display = "block";
-    $inputArea.style.display = "block";
-    $serverInfo.style.display = "flex";
-  }
-
-  function setStatus(status) {
-    $statusBadge.className = "status-badge " + status;
-    var label = status;
-    if (status === "lease-ended") label = "session ended";
-    $statusText.textContent = label;
-    if ($connectionHint) {
-      if (status === "lease-ended") {
-        $connectionHint.textContent = "Start a new SSH session to reconnect";
-        $connectionHint.style.display = "";
-      } else if (status === "disconnected" || status === "connecting") {
-        $connectionHint.textContent = "ssh-add <key>, then ssh -A";
-        $connectionHint.style.display = "";
-      } else {
-        $connectionHint.style.display = "none";
-      }
+  updateSessionIndicator() {
+    const el = this.$.sessionIndicator();
+    if (this.state === 'ACTIVE_SESSION' && this.targetHost) {
+      el.textContent = this.targetUser + '@' + this.targetHost;
+      el.classList.add('active');
+    } else if (this.state === 'PROBING' || this.state === 'CONFIRMING' || this.state === 'STARTING') {
+      el.textContent = 'Connecting...';
+      el.classList.remove('active');
+    } else {
+      el.textContent = 'No active session';
+      el.classList.remove('active');
     }
-  }
+  },
 
-  // ── WebSocket ─────────────────────────────────────────────────────
-  function connect() {
-    if (leaseEnded) return;
-    if (ws && ws.readyState <= 1) return;
+  // ── Greeting ───────────────────────────────────────────────────
 
-    setStatus("connecting");
-    authenticated = false;
+  greetUser() {
+    const name = this.account?.display_name || this.account?.login || 'there';
+    this.addMessage('agent',
+      '👋 Hi ' + name + "! I'm Clawdfather — your AI server admin.\n\n" +
+      "Which server would you like to manage?\n" +
+      "(e.g., `ubuntu@api.mycompany.com` or `root@192.168.1.100`)"
+    );
+  },
 
-    // Connect to plugin's WS server (same host, /ws path or root)
-    var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    var host = window.location.host || "localhost:3000";
-    var wsUrl = proto + "//" + host;
+  // ── Send message (user action) ─────────────────────────────────
 
-    ws = new WebSocket(wsUrl);
+  async sendMessage(text) {
+    this.addMessage('user', text);
 
-    ws.onopen = function () {
-      setStatus("connecting");
-      // Authenticate with session ID
-      ws.send(JSON.stringify({ type: "auth", sessionId: sessionId }));
-    };
+    switch (this.state) {
+      case 'GREETING':
+      case 'COLLECT_TARGET':
+        await this.startOnboarding(text);
+        break;
 
-    ws.onmessage = function (event) {
-      try {
-        var msg = JSON.parse(event.data);
-        handleMessage(msg);
-      } catch (e) {
-        console.error("Failed to parse message:", e);
-      }
-    };
-
-    ws.onclose = function (event) {
-      authenticated = false;
-      if (event.code === 4001) {
-        leaseEnded = true;
-        setStatus("lease-ended");
-        addSystemMessage("Connection lease has ended. Your session is closed \u2014 start a new SSH session (`ssh -A`) to reconnect.");
-        disableInput();
-      } else {
-        setStatus("disconnected");
-        if (!leaseEnded) scheduleReconnect();
-      }
-    };
-
-    ws.onerror = function (err) {
-      console.error("WebSocket error:", err);
-    };
-  }
-
-  function scheduleReconnect() {
-    if (reconnectTimer) return;
-    reconnectTimer = setTimeout(function () {
-      reconnectTimer = null;
-      reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
-      connect();
-    }, reconnectDelay);
-  }
-
-  // ── Message Handling ──────────────────────────────────────────────
-  function handleMessage(msg) {
-    switch (msg.type) {
-      case "session":
-        // Authenticated + session info received
-        authenticated = true;
-        setStatus("connected");
-        reconnectDelay = 1000;
-        serverTarget = msg.targetUser + "@" + msg.targetHost;
-        $targetDisplay.textContent = serverTarget;
-        addSystemMessage("Connected to " + serverTarget);
-
-        // Only send the bootstrap system prompt once per session to
-        // avoid re-injecting context on every reconnect.
-        if (!bootstrapSent) {
-          bootstrapSent = true;
-          sendMessage(
-            "[System: Clawdfather session active. Connected to " + serverTarget +
-            " (port " + (msg.targetPort || 22) + ").\n\n" +
-            "To run commands on the connected server, use the exec tool with the " +
-            "session's SSH ControlMaster (managed server-side).\n\n" +
-            "For interactive commands, use exec with pty:true.\n" +
-            "For long-running commands, use exec with background:true and poll with the process tool.\n\n" +
-            "Start by running basic recon: hostname, uname -a, uptime.]"
-          );
+      case 'NEEDS_INSTALL':
+        if (/^(done|ready|installed|ok|yes)$/i.test(text.trim())) {
+          await this.confirmAndConnect();
+        } else {
+          this.addMessage('agent', "Say **Done** when you've run the install command on your server. ⌛");
         }
         break;
 
-      case "message":
-        removeThinking();
-        if (msg.role === "assistant") {
-          addAssistantMessage(msg.text || "");
-        }
-        scrollToBottom();
+      case 'BLOCKED':
+        await this.handleBlockedInput(text);
         break;
 
-      case "status":
-        if (msg.status === "thinking") {
-          showThinking();
-        } else if (msg.status === "done") {
-          removeThinking();
+      case 'ACTIVE_SESSION':
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: 'message', text: text }));
+          this.showTyping();
+        } else {
+          this.addMessage('system', 'Connection lost. Trying to reconnect...');
         }
         break;
 
-      case "error":
-        removeThinking();
-        addSystemMessage("Error: " + (msg.message || "Unknown error"));
+      case 'SESSION_ENDED':
+        await this.startOnboarding(text);
         break;
 
       default:
-        console.log("Unknown message type:", msg.type);
+        this.addMessage('system', 'Please wait...');
     }
-  }
+  },
 
-  function sendMessage(text) {
-    if (!ws || ws.readyState !== 1 || !authenticated) return;
-    ws.send(JSON.stringify({ type: "message", text: text }));
-  }
+  // ── Onboarding: parse target ───────────────────────────────────
 
-  // ── Render Messages ───────────────────────────────────────────────
-  function addMessage(role, text) {
-    var div = document.createElement("div");
-    div.className = "message " + role;
+  async startOnboarding(userInput) {
+    const match = userInput.trim().match(/^([a-z_][a-z0-9_-]*)@([a-zA-Z0-9._-]+)(?::(\d+))?$/);
+    if (!match) {
+      this.addMessage('agent',
+        "Please provide in the format `user@host` (e.g., `ubuntu@myserver.com`).\n\n" +
+        "You can also specify a port: `ubuntu@myserver.com:2222`"
+      );
+      this.setState('COLLECT_TARGET');
+      return;
+    }
 
-    var header = document.createElement("div");
-    header.className = "message-header";
+    this.targetUser = match[1];
+    this.targetHost = match[2];
+    this.targetPort = match[3] ? parseInt(match[3], 10) : 22;
 
-    var sender = document.createElement("span");
-    sender.className = "message-sender " + role;
-    sender.textContent = role === "user" ? "You" : role === "assistant" ? "🦞 Clawdfather" : "System";
+    await this.probeConnectivity(this.targetHost, this.targetPort);
+  },
 
-    var time = document.createElement("span");
-    time.className = "message-time";
-    time.textContent = new Date().toLocaleTimeString();
+  // ── Probe connectivity ─────────────────────────────────────────
 
-    header.appendChild(sender);
-    header.appendChild(time);
+  async probeConnectivity(host, port) {
+    this.setState('PROBING');
+    this.addMessage('agent', 'Checking connectivity to `' + host + ':' + port + '`... ⏳');
+    this.showTyping();
 
-    var body = document.createElement("div");
-    body.className = "message-body";
-    body.innerHTML = renderMarkdown(text);
+    try {
+      const res = await this.api('POST', '/api/v1/connections/probe', { host, port });
+      this.removeTyping();
 
-    // Add copy buttons to code blocks
-    body.querySelectorAll("pre").forEach(function (pre) {
-      var btn = document.createElement("button");
-      btn.className = "copy-btn";
-      btn.textContent = "copy";
-      btn.onclick = function () {
-        var code = pre.querySelector("code");
-        navigator.clipboard.writeText(code ? code.textContent : pre.textContent);
-        btn.textContent = "copied!";
-        setTimeout(function () { btn.textContent = "copy"; }, 1500);
-      };
-      pre.style.position = "relative";
-      pre.appendChild(btn);
+      if (!res.ok) {
+        if (res.status === 429) {
+          this.addMessage('agent', 'Too many attempts. Please wait a moment and try again.');
+          this.setState('COLLECT_TARGET');
+          return;
+        }
+        this.addMessage('agent', 'Something went wrong checking connectivity. Try again in a moment.');
+        this.setState('COLLECT_TARGET');
+        return;
+      }
+
+      const probe = res.data;
+
+      switch (probe.status) {
+        case 'connectable':
+          this.addMessage('agent', '✅ Port ' + port + ' is open on `' + host + '`.');
+          await this.bootstrapConnection(host, this.targetUser, port);
+          break;
+
+        case 'dns_fail':
+          this.setState('BLOCKED');
+          this.addMessage('agent',
+            '❌ Couldn\'t resolve hostname: `' + host + '`\n\n' +
+            'This usually means:\n' +
+            '• The hostname doesn\'t exist or isn\'t public\n' +
+            '• There\'s a typo\n\n' +
+            'Double-check the hostname, or try with an IP address instead.'
+          );
+          break;
+
+        case 'port_fail':
+          this.setState('BLOCKED');
+          this.addMessage('agent',
+            '❌ Port ' + port + ' on `' + host + '` isn\'t reachable from here.\n\n' +
+            'This usually means:\n' +
+            '• The server is behind a firewall or VPN\n' +
+            '• SSH is running on a different port\n\n' +
+            'Options:\n' +
+            '• If you need VPN: connect to it, then say **retry**\n' +
+            '• If SSH is on a different port: tell me (e.g., "port 2222")\n' +
+            '• If there\'s a bastion host: let me know'
+          );
+          break;
+
+        case 'ssh_fail':
+          this.setState('BLOCKED');
+          this.addMessage('agent',
+            '⚠️ Port ' + port + ' on `' + host + '` is open, but it\'s not speaking SSH.\n\n' +
+            'It might be running a different service on port ' + port + '.\n' +
+            'Is SSH on a different port? (e.g., "port 2222")'
+          );
+          break;
+
+        default:
+          this.setState('COLLECT_TARGET');
+          this.addMessage('agent', 'Unexpected probe result. Please try again.');
+      }
+    } catch (err) {
+      this.removeTyping();
+      this.addMessage('agent', 'Network error. Check your connection and try again.');
+      this.setState('COLLECT_TARGET');
+    }
+  },
+
+  // ── Blocked state handling ─────────────────────────────────────
+
+  async handleBlockedInput(text) {
+    const lower = text.trim().toLowerCase();
+
+    if (lower === 'retry' || lower === 'try again') {
+      await this.probeConnectivity(this.targetHost, this.targetPort);
+      return;
+    }
+
+    const portMatch = lower.match(/^port\s+(\d+)$/);
+    if (portMatch) {
+      this.targetPort = parseInt(portMatch[1], 10);
+      await this.probeConnectivity(this.targetHost, this.targetPort);
+      return;
+    }
+
+    const ipMatch = text.trim().match(/^(?:ip\s+)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (ipMatch) {
+      this.targetHost = ipMatch[1];
+      await this.probeConnectivity(this.targetHost, this.targetPort);
+      return;
+    }
+
+    const fullTarget = text.trim().match(/^([a-z_][a-z0-9_-]*)@([a-zA-Z0-9._-]+)(?::(\d+))?$/);
+    if (fullTarget) {
+      this.targetUser = fullTarget[1];
+      this.targetHost = fullTarget[2];
+      this.targetPort = fullTarget[3] ? parseInt(fullTarget[3], 10) : 22;
+      await this.probeConnectivity(this.targetHost, this.targetPort);
+      return;
+    }
+
+    this.addMessage('agent',
+      'I can help! Try one of these:\n' +
+      '• Say **retry** to probe again\n' +
+      '• Say **port 2222** to try a different port\n' +
+      '• Provide a new address (e.g., `user@host`)'
+    );
+  },
+
+  // ── Bootstrap connection ───────────────────────────────────────
+
+  async bootstrapConnection(host, username, port) {
+    this.setState('NEEDS_INSTALL');
+    this.showTyping();
+
+    try {
+      const res = await this.api('POST', '/api/v1/sessions/bootstrap', { host, username, port });
+      this.removeTyping();
+
+      if (!res.ok) {
+        this.addMessage('agent', 'Error setting up connection: ' + (res.data?.message || 'Unknown error'));
+        this.setState('COLLECT_TARGET');
+        return;
+      }
+
+      this.connectionId = res.data.connection_id;
+
+      if (res.data.status === 'ready') {
+        this.addMessage('agent', '✅ Your key is already installed on this server!');
+        await this.confirmAndConnect();
+        return;
+      }
+
+      const installCmd = res.data.install_command;
+      this.addMessage('agent',
+        'Run this command on your server to install my SSH key:\n\n' +
+        '```\n' + installCmd + '\n```\n\n' +
+        'Say **Done** when you\'ve run it. ⌛',
+        { installCommand: installCmd }
+      );
+    } catch (err) {
+      this.removeTyping();
+      this.addMessage('agent', 'Network error. Check your connection and try again.');
+      this.setState('COLLECT_TARGET');
+    }
+  },
+
+  // ── Confirm and connect ────────────────────────────────────────
+
+  async confirmAndConnect() {
+    this.setState('CONFIRMING');
+    this.addMessage('agent', 'Testing connection to `' + this.targetUser + '@' + this.targetHost + '`... 🔍');
+    this.showTyping();
+
+    try {
+      const res = await this.api('POST', '/api/v1/sessions/bootstrap/' + this.connectionId + '/confirm');
+      this.removeTyping();
+
+      if (!res.ok) {
+        this.setState('NEEDS_INSTALL');
+        const lastInstallCmd = this._lastInstallCommand;
+        let msg = "❌ Couldn't connect. Make sure you've run the install command on the server, then say **Done** to try again.";
+        if (lastInstallCmd) {
+          msg += '\n\n```\n' + lastInstallCmd + '\n```';
+        }
+        this.addMessage('agent', msg);
+        return;
+      }
+
+      this.sessionId = res.data.session_id;
+      this.setState('STARTING');
+      this.addMessage('agent', '✅ Connected! I\'m now talking to `' + this.targetUser + '@' + this.targetHost + '`.');
+      this.connectWebSocket(this.sessionId);
+      this.setState('ACTIVE_SESSION');
+
+    } catch (err) {
+      this.removeTyping();
+      this.setState('NEEDS_INSTALL');
+      this.addMessage('agent', 'Network error during connection test. Say **Done** to try again.');
+    }
+  },
+
+  // ── End session ────────────────────────────────────────────────
+
+  async endSession() {
+    if (!this.sessionId) return;
+
+    try {
+      await this.api('DELETE', '/api/v1/sessions/' + this.sessionId);
+    } catch {}
+
+    if (this.ws) { this.ws.close(); this.ws = null; }
+    this.sessionId = null;
+    this.connectionId = null;
+    this.targetHost = null;
+    this.targetUser = null;
+    this.targetPort = null;
+    this.setState('GREETING');
+    this.updateSessionIndicator();
+    this.addMessage('agent', 'Session ended. Which server would you like to connect to next?');
+  },
+
+  // ── Session restore ────────────────────────────────────────────
+
+  async tryRestoreSession() {
+    try {
+      const res = await this.api('GET', '/api/v1/sessions');
+      if (!res.ok) return;
+
+      const active = res.data.sessions.find(s => s.status === 'active');
+      if (!active) return;
+
+      this.sessionId = active.id;
+      this.targetHost = active.host;
+      this.targetUser = active.username;
+      this.targetPort = active.port;
+      this.addMessage('system', 'Reconnecting to ' + active.username + '@' + active.host + '...');
+      this.connectWebSocket(this.sessionId);
+      this.setState('ACTIVE_SESSION');
+    } catch {}
+  },
+
+  // ── WebSocket ──────────────────────────────────────────────────
+
+  connectWebSocket(sessionId) {
+    if (this.ws) { this.ws.close(); this.ws = null; }
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = proto + '//' + window.location.host + '/ws/' + sessionId;
+
+    const ws = new WebSocket(wsUrl);
+    this.ws = ws;
+
+    ws.onopen = () => {
+      // WS connected — server identifies session from URL
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        this.handleInbound(data);
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      if (this.ws === ws && this.state === 'ACTIVE_SESSION') {
+        this.addMessage('system', 'Connection to server was lost.');
+        this.ws = null;
+        this.sessionId = null;
+        this.setState('GREETING');
+        this.updateSessionIndicator();
+        this.addMessage('agent', 'Which server would you like to connect to?');
+      }
+    };
+
+    ws.onerror = () => {};
+  },
+
+  handleInbound(data) {
+    switch (data.type) {
+      case 'message':
+        this.removeTyping();
+        if (data.role === 'assistant' || data.role === 'agent') {
+          this.addMessage('agent', data.text || data.content || '');
+        }
+        break;
+
+      case 'session':
+        // Session info from server on WS connect
+        break;
+
+      case 'status':
+        if (data.status === 'thinking') this.showTyping();
+        else if (data.status === 'done') this.removeTyping();
+        break;
+
+      case 'error':
+        this.removeTyping();
+        this.addMessage('system', 'Error: ' + (data.message || 'Unknown error'));
+        break;
+    }
+  },
+
+  // ── Public key display ─────────────────────────────────────────
+
+  async showPublicKey() {
+    this.closeMenu();
+    try {
+      const res = await this.api('GET', '/api/v1/keys/default/install-command');
+      if (res.ok) {
+        this.addMessage('agent',
+          '🔑 Here\'s your Clawdfather public key install command:\n\n' +
+          '```\n' + res.data.install_command + '\n```\n\n' +
+          'Run this on any server to authorize Clawdfather access.'
+        );
+      } else {
+        this.addMessage('system', 'Could not retrieve your public key.');
+      }
+    } catch {
+      this.addMessage('system', 'Network error. Could not retrieve your public key.');
+    }
+  },
+
+  // ── Account menu ───────────────────────────────────────────────
+
+  toggleMenu() {
+    const menu = this.$.accountMenu();
+    if (menu.hidden) {
+      if (this.account) {
+        this.$.menuName().textContent = this.account.display_name || this.account.login;
+        this.$.menuLogin().textContent = '@' + this.account.login;
+        if (this.account.avatar_url) {
+          this.$.menuAvatar().style.backgroundImage = 'url(' + this.account.avatar_url + ')';
+        }
+      }
+      menu.hidden = false;
+
+      const overlay = document.createElement('div');
+      overlay.className = 'menu-overlay';
+      overlay.onclick = () => this.closeMenu();
+      document.body.appendChild(overlay);
+      this._menuOverlay = overlay;
+    } else {
+      this.closeMenu();
+    }
+  },
+
+  closeMenu() {
+    this.$.accountMenu().hidden = true;
+    if (this._menuOverlay) {
+      this._menuOverlay.remove();
+      this._menuOverlay = null;
+    }
+  },
+
+  // ── Chat UI ────────────────────────────────────────────────────
+
+  addMessage(role, content, options) {
+    options = options || {};
+    const thread = this.$.thread();
+
+    if (options.installCommand) {
+      this._lastInstallCommand = options.installCommand;
+    }
+
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'msg msg-' + role;
+    if (options.id) msgDiv.id = options.id;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.innerHTML = this.renderContent(content);
+
+    bubble.querySelectorAll('.code-block-wrapper').forEach((wrapper) => {
+      const btn = wrapper.querySelector('.btn-copy');
+      const code = wrapper.querySelector('code');
+      if (btn && code) {
+        btn.addEventListener('click', () => {
+          navigator.clipboard.writeText(code.textContent).then(() => {
+            btn.textContent = 'Copied! ✓';
+            btn.classList.add('copied');
+            setTimeout(() => {
+              btn.textContent = 'Copy';
+              btn.classList.remove('copied');
+            }, 2000);
+          }).catch(() => {});
+        });
+      }
     });
 
-    div.appendChild(header);
-    div.appendChild(body);
-    $messages.appendChild(div);
-    scrollToBottom();
-  }
+    msgDiv.appendChild(bubble);
+    thread.appendChild(msgDiv);
+    this.scrollToBottom();
+  },
 
-  function addUserMessage(text) { addMessage("user", text); }
-  function addAssistantMessage(text) { addMessage("assistant", text); }
-  function addSystemMessage(text) { addMessage("system", text); }
+  showTyping() {
+    if (document.getElementById('typing-indicator')) return;
+    const thread = this.$.thread();
+    const div = document.createElement('div');
+    div.id = 'typing-indicator';
+    div.className = 'typing-indicator';
+    div.innerHTML = '<div class="dots"><span></span><span></span><span></span></div>';
+    thread.appendChild(div);
+    this.scrollToBottom();
+  },
 
-  function showThinking() {
-    if (isThinking) return;
-    isThinking = true;
-    var div = document.createElement("div");
-    div.className = "thinking";
-    div.id = "thinking-indicator";
-    div.innerHTML =
-      '<div class="thinking-dots"><span></span><span></span><span></span></div>' +
-      " Thinking...";
-    $messages.appendChild(div);
-    scrollToBottom();
-  }
-
-  function removeThinking() {
-    isThinking = false;
-    var el = document.getElementById("thinking-indicator");
+  removeTyping() {
+    const el = document.getElementById('typing-indicator');
     if (el) el.remove();
-  }
+  },
 
-  function scrollToBottom() {
-    requestAnimationFrame(function () {
-      $messages.scrollTop = $messages.scrollHeight;
+  scrollToBottom() {
+    const thread = this.$.thread();
+    requestAnimationFrame(() => {
+      thread.scrollTop = thread.scrollHeight;
     });
-  }
+  },
 
-  // ── Simple Markdown Renderer ──────────────────────────────────────
-  function renderMarkdown(text) {
-    if (!text) return "";
+  // ── Content renderer (markdown-lite) ───────────────────────────
 
-    var html = text
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+  renderContent(text) {
+    if (!text) return '';
 
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function (_, lang, code) {
-      return '<pre><code class="language-' + (lang || "text") + '">' + code.trim() + "</code></pre>";
+    let html = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+      return '<div class="code-block-wrapper"><pre><code>' +
+        code.trim() +
+        '</code></pre><button class="btn-copy">Copy</button></div>';
     });
 
-    html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
     html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    html = html.replace(/\n/g, '<br>');
 
-    html = html.replace(/\n/g, "<br>");
-    html = html.replace(/<pre><code([^>]*)>([\s\S]*?)<\/code><\/pre>/g, function (match) {
-      return match.replace(/<br>/g, "\n");
+    html = html.replace(/<div class="code-block-wrapper"><pre><code>([\s\S]*?)<\/code><\/pre>/g, function(match) {
+      return match.replace(/<br>/g, '\n');
     });
 
     return html;
-  }
+  },
 
-  // ── Disable input (lease ended) ───────────────────────────────────
-  function disableInput() {
-    $input.disabled = true;
-    $sendBtn.disabled = true;
-    $inputArea.classList.add("disabled");
+  // ── API helper ─────────────────────────────────────────────────
 
-    // Add a sticky banner above the input to explain the state
-    if (!document.getElementById("lease-ended-banner")) {
-      var banner = document.createElement("div");
-      banner.id = "lease-ended-banner";
-      banner.className = "lease-ended-banner";
-      banner.textContent = "\uD83D\uDD12 Connection lease has ended. Reconnect to continue.";
-      // Insert before the input area so it appears above it
-      $inputArea.parentNode.insertBefore(banner, $inputArea);
+  async api(method, path, body) {
+    const opts = {
+      method,
+      headers: {},
+      credentials: 'same-origin',
+    };
+
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
     }
-  }
 
-  // ── Input Handling ────────────────────────────────────────────────
-  $input.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send();
+    const res = await fetch(path, opts);
+
+    if (res.status === 401) {
+      this.account = null;
+      this.$.screenChat().hidden = true;
+      this.$.screenAuth().hidden = false;
+      this.setState('AUTH');
+      return { ok: false, status: 401, data: null };
     }
-  });
 
-  $input.addEventListener("input", function () {
-    this.style.height = "auto";
-    this.style.height = Math.min(this.scrollHeight, 200) + "px";
-  });
-
-  $sendBtn.addEventListener("click", send);
-
-  function send() {
-    var text = $input.value.trim();
-    if (!text || !authenticated) return;
-
-    addUserMessage(text);
-    sendMessage(text);
-    $input.value = "";
-    $input.style.height = "auto";
-  }
-
-  // ── Hash change (new session) ─────────────────────────────────────
-  window.addEventListener("hashchange", function () {
-    var hash = window.location.hash.slice(1);
-    var params = new URLSearchParams(hash);
-    var newSession = params.get("session");
-    if (newSession && newSession !== sessionId) {
-      sessionId = newSession;
-      bootstrapSent = false;
-      leaseEnded = false;
-
-      // Scrub token from URL immediately
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState(null, "", window.location.pathname + window.location.search);
-      } else {
-        window.location.hash = "";
-      }
-
-      $messages.innerHTML = "";
-      authenticated = false;
-      $input.disabled = false;
-      $sendBtn.disabled = false;
-      $inputArea.classList.remove("disabled");
-      // Remove lease-ended banner if present from previous session
-      var oldBanner = document.getElementById("lease-ended-banner");
-      if (oldBanner) oldBanner.remove();
-      if (ws) ws.close();
-      showChat();
-      $sessionDisplay.textContent = sessionId.slice(0, 8) + "...";
-      addSystemMessage("Connecting to new session...");
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      connect();
+    if (res.status === 204) {
+      return { ok: true, status: 204, data: null };
     }
-  });
 
-  // ── Start ─────────────────────────────────────────────────────────
-  init();
-})();
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {}
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: data,
+    };
+  },
+};
+
+// Boot
+document.addEventListener('DOMContentLoaded', () => app.init());
