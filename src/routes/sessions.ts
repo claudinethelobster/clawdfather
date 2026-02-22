@@ -260,6 +260,7 @@ export async function handleListSessions(
     connection: { id: r.conn_id, label: r.conn_label, host: r.conn_host },
     started_at: r.started_at,
     last_heartbeat_at: r.last_heartbeat_at,
+    closed_at: r.closed_at ?? null,
   }));
 
   apiOk(res, {
@@ -308,6 +309,7 @@ export async function handleGetSession(
       },
       started_at: r.started_at,
       last_heartbeat_at: r.last_heartbeat_at,
+      closed_at: r.closed_at ?? null,
       close_reason: r.close_reason,
       chat_url: chatUrl,
     },
