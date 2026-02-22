@@ -88,15 +88,22 @@ export function createClawdfatherChannel(pluginConfig: ClawdfatherConfig, plugin
               accountId,
               config,
             });
-          }
+          },
         );
 
-        return {
-          stop: () => {
-            release();
-            ctx.log?.info("[clawdfather] Web server released for account");
-          },
-        };
+        // Block until the abort signal fires (prevents OpenClaw from thinking
+        // the channel has crashed and auto-restarting it).
+        await new Promise<void>((resolve) => {
+          if (ctx.abortSignal?.aborted) {
+            resolve();
+            return;
+          }
+          ctx.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+
+        // Cleanup
+        release();
+        ctx.log?.info(`[clawdfather] Web server released for account ${accountId}`);
       },
     },
   };
