@@ -3,13 +3,27 @@
  *
  * State machine:
  *   AUTH → LOADING → GREETING → COLLECT_TARGET → PROBING →
- *     → NEEDS_INSTALL → CONFIRMING → ACTIVE_SESSION
+ *     → NEEDS_INSTALL → CONFIRMING → STARTING → ACTIVE_SESSION
  *     → BLOCKED → COLLECT_TARGET (retry)
- *     → READY → STARTING → ACTIVE_SESSION
+ *     → SESSION_ENDED → GREETING
  */
 
-const app = {
-  state: 'AUTH',
+var STATES = {
+  AUTH: 'AUTH',
+  LOADING: 'LOADING',
+  GREETING: 'GREETING',
+  COLLECT_TARGET: 'COLLECT_TARGET',
+  PROBING: 'PROBING',
+  NEEDS_INSTALL: 'NEEDS_INSTALL',
+  BLOCKED: 'BLOCKED',
+  CONFIRMING: 'CONFIRMING',
+  STARTING: 'STARTING',
+  ACTIVE_SESSION: 'ACTIVE_SESSION',
+  SESSION_ENDED: 'SESSION_ENDED',
+};
+
+var app = {
+  state: STATES.AUTH,
   account: null,
   sessionId: null,
   connectionId: null,
@@ -40,7 +54,7 @@ const app = {
 
   async init() {
     this.bindInput();
-    this.setState('LOADING');
+    this.setState(STATES.LOADING);
 
     const params = new URLSearchParams(window.location.search);
     if (params.get('session_established')) {
@@ -87,14 +101,14 @@ const app = {
         this.account = res.data.account;
         this.showChatScreen();
         await this.tryRestoreSession();
-        if (this.state !== 'ACTIVE_SESSION') {
-          this.setState('GREETING');
+        if (this.state !== STATES.ACTIVE_SESSION) {
+          this.setState(STATES.GREETING);
           this.greetUser();
         }
         return;
       }
     } catch {}
-    this.setState('AUTH');
+    this.setState(STATES.AUTH);
     this.$.screenAuth().hidden = false;
     this.$.screenChat().hidden = true;
   },
@@ -114,7 +128,7 @@ const app = {
     if (this.ws) { this.ws.close(); this.ws = null; }
     this.$.screenChat().hidden = true;
     this.$.screenAuth().hidden = false;
-    this.setState('AUTH');
+    this.setState(STATES.AUTH);
   },
 
   // ── Screen management ──────────────────────────────────────────
@@ -138,24 +152,25 @@ const app = {
     const btnSend = this.$.btnSend();
     const btnEnd = this.$.btnEnd();
 
-    const inputActive = ['GREETING', 'COLLECT_TARGET', 'NEEDS_INSTALL', 'BLOCKED', 'ACTIVE_SESSION', 'SESSION_ENDED'].includes(newState);
+    var inputActive = [STATES.GREETING, STATES.COLLECT_TARGET, STATES.NEEDS_INSTALL, STATES.BLOCKED, STATES.ACTIVE_SESSION, STATES.SESSION_ENDED].indexOf(newState) !== -1;
     input.disabled = !inputActive;
     btnSend.disabled = !inputActive;
 
-    if (inputActive && newState !== 'SESSION_ENDED') {
+    if (inputActive && newState !== STATES.SESSION_ENDED) {
       input.focus();
     }
 
-    btnEnd.hidden = newState !== 'ACTIVE_SESSION';
+    btnEnd.hidden = newState !== STATES.ACTIVE_SESSION;
     this.updateSessionIndicator();
   },
 
   updateSessionIndicator() {
     const el = this.$.sessionIndicator();
-    if (this.state === 'ACTIVE_SESSION' && this.targetHost) {
-      el.textContent = this.targetUser + '@' + this.targetHost;
+    if (this.state === STATES.ACTIVE_SESSION && this.targetHost) {
+      var portSuffix = this.targetPort && this.targetPort !== 22 ? ':' + this.targetPort : '';
+      el.textContent = this.targetUser + '@' + this.targetHost + portSuffix + ' \u2022 Connected';
       el.classList.add('active');
-    } else if (this.state === 'PROBING' || this.state === 'CONFIRMING' || this.state === 'STARTING') {
+    } else if (this.state === STATES.PROBING || this.state === STATES.CONFIRMING || this.state === STATES.STARTING) {
       el.textContent = 'Connecting...';
       el.classList.remove('active');
     } else {
@@ -181,24 +196,24 @@ const app = {
     this.addMessage('user', text);
 
     switch (this.state) {
-      case 'GREETING':
-      case 'COLLECT_TARGET':
+      case STATES.GREETING:
+      case STATES.COLLECT_TARGET:
         await this.startOnboarding(text);
         break;
 
-      case 'NEEDS_INSTALL':
-        if (/^(done|ready|installed|ok|yes)$/i.test(text.trim())) {
+      case STATES.NEEDS_INSTALL:
+        if (/^(done|ready|installed|ok|yes)[\s!.]*$/i.test(text.trim())) {
           await this.confirmAndConnect();
         } else {
-          this.addMessage('agent', "Say **Done** when you've run the install command on your server. ⌛");
+          this.addMessage('agent', "Say **Done** when you've run the install command on your server. \u231B");
         }
         break;
 
-      case 'BLOCKED':
+      case STATES.BLOCKED:
         await this.handleBlockedInput(text);
         break;
 
-      case 'ACTIVE_SESSION':
+      case STATES.ACTIVE_SESSION:
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({ type: 'message', text: text }));
           this.showTyping();
@@ -207,7 +222,7 @@ const app = {
         }
         break;
 
-      case 'SESSION_ENDED':
+      case STATES.SESSION_ENDED:
         await this.startOnboarding(text);
         break;
 
@@ -225,7 +240,7 @@ const app = {
         "Please provide in the format `user@host` (e.g., `ubuntu@myserver.com`).\n\n" +
         "You can also specify a port: `ubuntu@myserver.com:2222`"
       );
-      this.setState('COLLECT_TARGET');
+      this.setState(STATES.COLLECT_TARGET);
       return;
     }
 
@@ -239,7 +254,7 @@ const app = {
   // ── Probe connectivity ─────────────────────────────────────────
 
   async probeConnectivity(host, port) {
-    this.setState('PROBING');
+    this.setState(STATES.PROBING);
     this.addMessage('agent', 'Checking connectivity to `' + host + ':' + port + '`... ⏳');
     this.showTyping();
 
@@ -250,11 +265,11 @@ const app = {
       if (!res.ok) {
         if (res.status === 429) {
           this.addMessage('agent', 'Too many attempts. Please wait a moment and try again.');
-          this.setState('COLLECT_TARGET');
+          this.setState(STATES.COLLECT_TARGET);
           return;
         }
         this.addMessage('agent', 'Something went wrong checking connectivity. Try again in a moment.');
-        this.setState('COLLECT_TARGET');
+        this.setState(STATES.COLLECT_TARGET);
         return;
       }
 
@@ -267,7 +282,7 @@ const app = {
           break;
 
         case 'dns_fail':
-          this.setState('BLOCKED');
+          this.setState(STATES.BLOCKED);
           this.addMessage('agent',
             '❌ Couldn\'t resolve hostname: `' + host + '`\n\n' +
             'This usually means:\n' +
@@ -278,7 +293,7 @@ const app = {
           break;
 
         case 'port_fail':
-          this.setState('BLOCKED');
+          this.setState(STATES.BLOCKED);
           this.addMessage('agent',
             '❌ Port ' + port + ' on `' + host + '` isn\'t reachable from here.\n\n' +
             'This usually means:\n' +
@@ -292,7 +307,7 @@ const app = {
           break;
 
         case 'ssh_fail':
-          this.setState('BLOCKED');
+          this.setState(STATES.BLOCKED);
           this.addMessage('agent',
             '⚠️ Port ' + port + ' on `' + host + '` is open, but it\'s not speaking SSH.\n\n' +
             'It might be running a different service on port ' + port + '.\n' +
@@ -301,13 +316,13 @@ const app = {
           break;
 
         default:
-          this.setState('COLLECT_TARGET');
+          this.setState(STATES.COLLECT_TARGET);
           this.addMessage('agent', 'Unexpected probe result. Please try again.');
       }
     } catch (err) {
       this.removeTyping();
       this.addMessage('agent', 'Network error. Check your connection and try again.');
-      this.setState('COLLECT_TARGET');
+      this.setState(STATES.COLLECT_TARGET);
     }
   },
 
@@ -355,7 +370,7 @@ const app = {
   // ── Bootstrap connection ───────────────────────────────────────
 
   async bootstrapConnection(host, username, port) {
-    this.setState('NEEDS_INSTALL');
+    this.setState(STATES.NEEDS_INSTALL);
     this.showTyping();
 
     try {
@@ -364,45 +379,45 @@ const app = {
 
       if (!res.ok) {
         this.addMessage('agent', 'Error setting up connection: ' + (res.data?.message || 'Unknown error'));
-        this.setState('COLLECT_TARGET');
+        this.setState(STATES.COLLECT_TARGET);
         return;
       }
 
       this.connectionId = res.data.connection_id;
 
       if (res.data.status === 'ready') {
-        this.addMessage('agent', '✅ Your key is already installed on this server!');
+        this.addMessage('agent', '\u2705 You\'ve connected to this server before \u2014 reconnecting...');
         await this.confirmAndConnect();
         return;
       }
 
-      const installCmd = res.data.install_command;
+      var installCmd = res.data.install_command;
       this.addMessage('agent',
-        'Run this command on your server to install my SSH key:\n\n' +
+        'Run this command on **' + username + '@' + host + '** to install my SSH key:\n\n' +
         '```\n' + installCmd + '\n```\n\n' +
-        'Say **Done** when you\'ve run it. ⌛',
+        'Say **Done** when you\'ve run it. \u231B',
         { installCommand: installCmd }
       );
     } catch (err) {
       this.removeTyping();
       this.addMessage('agent', 'Network error. Check your connection and try again.');
-      this.setState('COLLECT_TARGET');
+      this.setState(STATES.COLLECT_TARGET);
     }
   },
 
   // ── Confirm and connect ────────────────────────────────────────
 
   async confirmAndConnect() {
-    this.setState('CONFIRMING');
+    this.setState(STATES.CONFIRMING);
     this.addMessage('agent', 'Testing connection to `' + this.targetUser + '@' + this.targetHost + '`... 🔍');
     this.showTyping();
 
     try {
-      const res = await this.api('POST', '/api/v1/sessions/bootstrap/' + this.connectionId + '/confirm');
+      const res = await this.api('POST', '/api/v1/sessions/bootstrap/' + this.connectionId + '/confirm', { accept_host_key: true });
       this.removeTyping();
 
       if (!res.ok) {
-        this.setState('NEEDS_INSTALL');
+        this.setState(STATES.NEEDS_INSTALL);
         const lastInstallCmd = this._lastInstallCommand;
         let msg = "❌ Couldn't connect. Make sure you've run the install command on the server, then say **Done** to try again.";
         if (lastInstallCmd) {
@@ -413,14 +428,15 @@ const app = {
       }
 
       this.sessionId = res.data.session_id;
-      this.setState('STARTING');
-      this.addMessage('agent', '✅ Connected! I\'m now talking to `' + this.targetUser + '@' + this.targetHost + '`.');
+      this.setState(STATES.STARTING);
+      this.addMessage('agent', '✅ Connected to **' + this.targetUser + '@' + this.targetHost + '**! I can now run commands on this server.');
       this.connectWebSocket(this.sessionId);
-      this.setState('ACTIVE_SESSION');
+      this.updateSessionIndicator();
+      this.setState(STATES.ACTIVE_SESSION);
 
     } catch (err) {
       this.removeTyping();
-      this.setState('NEEDS_INSTALL');
+      this.setState(STATES.NEEDS_INSTALL);
       this.addMessage('agent', 'Network error during connection test. Say **Done** to try again.');
     }
   },
@@ -430,18 +446,20 @@ const app = {
   async endSession() {
     if (!this.sessionId) return;
 
+    this.setState(STATES.SESSION_ENDED);
+    if (this.ws) { this.ws.close(); this.ws = null; }
+
     try {
       await this.api('DELETE', '/api/v1/sessions/' + this.sessionId);
     } catch {}
 
-    if (this.ws) { this.ws.close(); this.ws = null; }
     this.sessionId = null;
     this.connectionId = null;
     this.targetHost = null;
     this.targetUser = null;
     this.targetPort = null;
-    this.setState('GREETING');
     this.updateSessionIndicator();
+    this.setState(STATES.GREETING);
     this.addMessage('agent', 'Session ended. Which server would you like to connect to next?');
   },
 
@@ -461,7 +479,7 @@ const app = {
       this.targetPort = active.port;
       this.addMessage('system', 'Reconnecting to ' + active.username + '@' + active.host + '...');
       this.connectWebSocket(this.sessionId);
-      this.setState('ACTIVE_SESSION');
+      this.setState(STATES.ACTIVE_SESSION);
     } catch {}
   },
 
@@ -488,11 +506,11 @@ const app = {
     };
 
     ws.onclose = () => {
-      if (this.ws === ws && this.state === 'ACTIVE_SESSION') {
+      if (this.ws === ws && this.state === STATES.ACTIVE_SESSION) {
         this.addMessage('system', 'Connection to server was lost.');
         this.ws = null;
         this.sessionId = null;
-        this.setState('GREETING');
+        this.setState(STATES.GREETING);
         this.updateSessionIndicator();
         this.addMessage('agent', 'Which server would you like to connect to?');
       }
@@ -534,9 +552,9 @@ const app = {
       const res = await this.api('GET', '/api/v1/keys/default/install-command');
       if (res.ok) {
         this.addMessage('agent',
-          '🔑 Here\'s your Clawdfather public key install command:\n\n' +
+          'Here\'s your public key install command:\n\n' +
           '```\n' + res.data.install_command + '\n```\n\n' +
-          'Run this on any server to authorize Clawdfather access.'
+          'Add this to any server\'s `~/.ssh/authorized_keys`.'
         );
       } else {
         this.addMessage('system', 'Could not retrieve your public key.');
@@ -690,7 +708,7 @@ const app = {
       this.account = null;
       this.$.screenChat().hidden = true;
       this.$.screenAuth().hidden = false;
-      this.setState('AUTH');
+      this.setState(STATES.AUTH);
       return { ok: false, status: 401, data: null };
     }
 
