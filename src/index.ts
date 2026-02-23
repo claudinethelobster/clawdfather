@@ -14,6 +14,10 @@ import { startSSHServer } from "./ssh-server";
 import { setClawdfatherRuntime } from "./runtime";
 import { createClawdfatherChannel } from "./channel";
 import type { ClawdfatherConfig } from "./types";
+import { loadEnvFile } from "./env";
+
+// Load .env if present
+loadEnvFile();
 
 // Resolve plugin root for static UI files
 const PLUGIN_ROOT = typeof __dirname !== "undefined"
@@ -24,12 +28,17 @@ export default function register(api: any) {
   // Store runtime for channel use
   setClawdfatherRuntime(api.runtime);
 
+  const pluginConfig = api.config?.plugins?.entries?.clawdfather?.config ?? {};
+
   const config: ClawdfatherConfig = {
     sshPort: 22,
     webPort: 3000,
     webDomain: "localhost",
     sessionTimeoutMs: 1800000,
-    ...api.config?.plugins?.entries?.clawdfather?.config,
+    githubClientId: process.env.GITHUB_CLIENT_ID,
+    githubClientSecret: process.env.GITHUB_CLIENT_SECRET,
+    masterKey: process.env.CLAWDFATHER_MASTER_KEY,
+    ...pluginConfig,
   };
 
   let sshServer: any = null;

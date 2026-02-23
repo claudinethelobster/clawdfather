@@ -2,145 +2,159 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clawdfather — Server Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0d0d0d">
+  <title>Clawdfather</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
 </head>
 <body>
   <div id="app">
-    <!-- Header -->
-    <div class="header">
-      <div class="header-left">
-        <span class="logo">🦞</span>
-        <div>
-          <div class="header-title">CLAWDFATHER</div>
-          <div class="header-subtitle">AI Server Admin · <span id="version-display"></span></div>
-        </div>
-      </div>
-      <div class="header-right">
-        <span id="connection-hint" class="connection-hint"></span>
-        <div id="status-badge" class="status-badge disconnected">
-          <span class="status-dot"></span>
-          <span id="status-text">disconnected</span>
-        </div>
-      </div>
-    </div>
 
-    <!-- Server info bar (hidden until connected) -->
-    <div id="server-info" class="server-info" style="display: none;">
-      <span><span class="label">target:</span> <span class="value" id="target-display">—</span></span>
-      <span><span class="label">session:</span> <span class="value" id="session-display">—</span></span>
-    </div>
-
-    <!-- Welcome screen (shown when no session) -->
-    <div id="welcome" class="welcome">
-      <div class="welcome-logo">🦞</div>
-      <h2>Welcome to Clawdfather</h2>
-      <p>Connect via SSH to start an AI-powered admin session.</p>
-      <!-- OS Tabs -->
-      <div class="os-tabs">
-        <button class="os-tab active" data-tab="unix">macOS / Linux</button>
-        <button class="os-tab" data-tab="windows">Windows</button>
-      </div>
-
-      <!-- macOS / Linux steps (existing, unchanged) -->
-      <div class="welcome-steps" id="tab-unix">
-        <div class="welcome-step-block">
-          <div class="step-num">1</div>
-          <div class="step-content">
-            <div class="step-title">Check if your SSH key is already loaded</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add -l</code>
-              <button class="step-copy-btn" data-cmd="ssh-add -l" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">If you see a key fingerprint, skip to step 3.</div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">2</div>
-          <div class="step-content">
-            <div class="step-title">Load your SSH key</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add ~/.ssh/id_ed25519</code>
-              <button class="step-copy-btn" data-cmd="ssh-add ~/.ssh/id_ed25519" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">Common key paths: <code>~/.ssh/id_ed25519</code> · <code>~/.ssh/id_rsa</code> · <code>~/.ssh/id_ecdsa</code></div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">3</div>
-          <div class="step-content">
-            <div class="step-title">Connect with agent forwarding</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh -A clawdfather.ai</code>
-              <button class="step-copy-btn" data-cmd="ssh -A clawdfather.ai" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">The <code>-A</code> flag forwards your SSH agent — required so Clawdfather can authenticate to your target servers.</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Windows steps (new) -->
-      <div class="welcome-steps" id="tab-windows" style="display:none;">
-        <div class="welcome-step-block">
-          <div class="step-num">1</div>
-          <div class="step-content">
-            <div class="step-title">Enable and start the SSH Agent service (run as Administrator)</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">Set-Service -Name ssh-agent -StartupType Automatic; Start-Service ssh-agent</code>
-              <button class="step-copy-btn" data-cmd="Set-Service -Name ssh-agent -StartupType Automatic; Start-Service ssh-agent" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">Open PowerShell as Administrator to run this command.</div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">2</div>
-          <div class="step-content">
-            <div class="step-title">Check if your SSH key is already loaded</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add -l</code>
-              <button class="step-copy-btn" data-cmd="ssh-add -l" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">If you see a key fingerprint, skip to step 4.</div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">3</div>
-          <div class="step-content">
-            <div class="step-title">Load your SSH key</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh-add $env:USERPROFILE\.ssh\id_ed25519</code>
-              <button class="step-copy-btn" data-cmd="ssh-add $env:USERPROFILE\.ssh\id_ed25519" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">Common key paths: <code>$env:USERPROFILE\.ssh\id_ed25519</code> · <code>$env:USERPROFILE\.ssh\id_rsa</code></div>
-          </div>
-        </div>
-        <div class="welcome-step-block">
-          <div class="step-num">4</div>
-          <div class="step-content">
-            <div class="step-title">Connect with agent forwarding</div>
-            <div class="step-cmd-row">
-              <code class="step-cmd">ssh -A clawdfather.ai</code>
-              <button class="step-copy-btn" data-cmd="ssh -A clawdfather.ai" title="Copy command">copy</button>
-            </div>
-            <div class="step-note">The <code>-A</code> flag forwards your SSH agent — required so Clawdfather can authenticate to your target servers.</div>
-          </div>
-        </div>
+    <!-- ════════ AUTH SCREEN ════════ -->
+    <div id="screen-auth" class="screen screen-auth">
+      <div class="auth-container">
+        <div class="auth-logo">🦞</div>
+        <h1 class="auth-title">CLAWDFATHER</h1>
+        <p class="auth-subtitle">AI-Powered Server Admin</p>
+        <button id="btn-github-login" class="btn btn-primary btn-lg btn-github">
+          <svg class="github-icon" viewBox="0 0 16 16" width="20" height="20" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          Sign in with GitHub
+        </button>
+        <div id="auth-error" class="auth-error" hidden></div>
       </div>
     </div>
 
-    <!-- Messages (hidden until session active) -->
-    <div id="messages" class="messages" style="display: none;"></div>
+    <!-- ════════ MAIN APP SHELL ════════ -->
+    <div id="app-shell" class="app-shell" hidden>
 
-    <!-- Input area (hidden until session active) -->
-    <div id="input-area" class="input-area" style="display: none;">
-      <div class="input-row">
-        <textarea id="message-input" rows="1" placeholder="Ask me to manage your server..." autofocus></textarea>
-        <button id="send-btn">Send</button>
-      </div>
-      <div class="input-hint">Enter to send · Shift+Enter for newline</div>
+      <!-- Header -->
+      <header class="app-header">
+        <div class="header-left">
+          <span class="header-logo">🦞</span>
+          <div>
+            <div class="header-title">CLAWDFATHER</div>
+            <div class="header-subtitle" id="header-account-name"></div>
+          </div>
+        </div>
+        <div class="header-right">
+          <div id="header-avatar" class="avatar-sm"></div>
+        </div>
+      </header>
+
+      <!-- View container -->
+      <main class="view-container">
+
+        <!-- ═══ SESSIONS VIEW ═══ -->
+        <div id="view-sessions" class="view">
+          <div id="sessions-loading" class="loading-state">
+            <div class="spinner"></div>
+            <p>Loading sessions...</p>
+          </div>
+          <div id="sessions-empty" class="empty-state" hidden>
+            <div class="empty-icon">💬</div>
+            <h3>No sessions yet</h3>
+            <p>Start a new session to connect to your server.</p>
+            <button class="btn btn-primary btn-lg" onclick="startOnboardingChat()">New Session</button>
+          </div>
+          <div id="sessions-list" class="card-list" hidden></div>
+          <button id="fab-new-session" class="fab" onclick="startOnboardingChat()" hidden aria-label="New session">
+            <span>+</span>
+          </button>
+        </div>
+
+        <!-- ═══ SETTINGS VIEW ═══ -->
+        <div id="view-settings" class="view" hidden>
+          <div class="settings-section">
+            <h3 class="section-title">Account</h3>
+            <div class="settings-card">
+              <div class="settings-account-row">
+                <div id="settings-avatar" class="avatar-lg"></div>
+                <div class="settings-account-info">
+                  <div id="settings-display-name" class="settings-name"></div>
+                  <div id="settings-email" class="settings-email"></div>
+                  <div class="settings-provider">
+                    <svg class="github-icon-sm" viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
+                      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                    </svg>
+                    GitHub linked
+                  </div>
+                </div>
+              </div>
+              <button id="btn-sign-out" class="btn btn-danger-text btn-block">Sign Out</button>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="section-title">About</h3>
+            <div class="settings-card">
+              <div class="settings-row">
+                <span class="settings-label">Version</span>
+                <span id="settings-version" class="settings-value">—</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ CHAT VIEW ═══ -->
+        <div id="view-chat" class="view view-chat" hidden>
+          <div class="chat-header">
+            <button id="btn-chat-back" class="btn-icon" onclick="exitChat()" aria-label="Go back">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <div class="chat-header-info">
+              <div id="chat-connection-label" class="chat-label"></div>
+              <div id="chat-timer" class="chat-timer"></div>
+            </div>
+            <button id="btn-end-session" class="btn btn-danger-sm" onclick="endCurrentSession()">End Session</button>
+            <button id="btn-cancel-onboarding" class="btn btn-secondary btn-sm" onclick="exitChat()" hidden>Cancel</button>
+          </div>
+          <div id="chat-messages" class="chat-messages"></div>
+          <div class="chat-input-area">
+            <div class="chat-input-row">
+              <textarea id="chat-input" rows="1" placeholder="Ask me to manage your server..."></textarea>
+              <button id="btn-chat-send" class="btn btn-primary btn-send" onclick="sendChatMessage()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </main>
+
+      <!-- Bottom Navigation -->
+      <nav id="bottom-nav" class="bottom-nav">
+        <button class="nav-tab active" data-view="sessions" onclick="navigate('sessions')">
+          <span class="nav-icon">💬</span>
+          <span class="nav-label">Sessions</span>
+        </button>
+        <button class="nav-tab" data-view="settings" onclick="navigate('settings')">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">Settings</span>
+        </button>
+      </nav>
     </div>
+
+    <!-- ════════ BOTTOM SHEET ════════ -->
+    <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+    <div id="sheet" class="sheet" hidden>
+      <div class="sheet-header">
+        <h2 id="sheet-title" class="sheet-title"></h2>
+        <button class="btn-icon sheet-close" onclick="closeSheet()" aria-label="Close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div id="sheet-content" class="sheet-content"></div>
+    </div>
+
+    <!-- ════════ TOAST CONTAINER ════════ -->
+    <div id="toast-container" class="toast-container"></div>
+
   </div>
 
   <script src="app.js"></script>

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clawdfather UI — Smoke Tests</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #0d0d0d; color: #f0f0f0; padding: 32px; }
+    h1 { font-size: 24px; margin-bottom: 8px; color: #e53935; }
+    .subtitle { color: #888; margin-bottom: 24px; font-size: 14px; }
+    .suite { margin-bottom: 28px; }
+    .suite-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 6px; }
+    .test { display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; font-size: 14px; font-family: "SF Mono", "Fira Code", monospace; }
+    .pass { color: #4caf50; }
+    .fail { color: #f44336; }
+    .badge { display: inline-block; width: 52px; font-weight: 700; flex-shrink: 0; }
+    .detail { color: #888; word-break: break-all; }
+    .summary { margin-top: 24px; padding: 16px; border-radius: 8px; font-size: 15px; font-weight: 600; }
+    .summary.all-pass { background: rgba(76,175,80,0.15); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
+    .summary.has-fail { background: rgba(244,67,54,0.15); color: #f44336; border: 1px solid rgba(244,67,54,0.3); }
+  </style>
+</head>
+<body>
+  <h1>🦞 Clawdfather Smoke Tests</h1>
+  <p class="subtitle">Pure JS utility function tests — open in any browser</p>
+  <div id="results"></div>
+  <div id="summary"></div>
+
+  <script>
+    // ── Functions Under Test (copied from app.js for standalone execution) ──
+
+    function parseSSHTarget(text) {
+      if (!text || typeof text !== "string") return null;
+      text = text.trim();
+      var atIdx = text.indexOf("@");
+      if (atIdx < 1) return null;
+
+      var username = text.substring(0, atIdx);
+      var rest = text.substring(atIdx + 1);
+      if (!rest) return null;
+
+      var port = 22;
+      var host = rest;
+      var colonIdx = rest.lastIndexOf(":");
+      if (colonIdx > 0) {
+        var portStr = rest.substring(colonIdx + 1);
+        var parsedPort = parseInt(portStr, 10);
+        if (!isNaN(parsedPort) && String(parsedPort) === portStr) {
+          port = parsedPort;
+          host = rest.substring(0, colonIdx);
+        }
+      }
+
+      if (!/^[a-z_][a-z0-9_-]{0,63}$/.test(username)) return null;
+      if (!host) return null;
+      if (port < 1 || port > 65535) return null;
+
+      return { username: username, host: host, port: port };
+    }
+
+    function renderMarkdown(text) {
+      if (!text) return "";
+
+      var html = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function (_, lang, code) {
+        return '<pre><code class="language-' + (lang || "text") + '">' + code.trim() + "</code></pre>";
+      });
+
+      html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+      html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+      html = html.replace(/\n/g, "<br>");
+
+      html = html.replace(/<pre><code([^>]*)>([\s\S]*?)<\/code><\/pre>/g, function (match) {
+        return match.replace(/<br>/g, "\n");
+      });
+
+      return html;
+    }
+
+    function timeAgo(dateStr) {
+      if (!dateStr) return "";
+      var now = Date.now();
+      var then = new Date(dateStr).getTime();
+      var diff = Math.floor((now - then) / 1000);
+
+      if (diff < 60) return "just now";
+      if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+      if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+      return Math.floor(diff / 86400) + "d ago";
+    }
+
+    // ── Test Runner ──
+
+    var totalPass = 0;
+    var totalFail = 0;
+    var resultsEl = document.getElementById("results");
+
+    function deepEqual(a, b) {
+      if (a === b) return true;
+      if (a === null || b === null) return a === b;
+      if (typeof a !== "object" || typeof b !== "object") return false;
+      var keysA = Object.keys(a), keysB = Object.keys(b);
+      if (keysA.length !== keysB.length) return false;
+      for (var i = 0; i < keysA.length; i++) {
+        if (!deepEqual(a[keysA[i]], b[keysA[i]])) return false;
+      }
+      return true;
+    }
+
+    function suite(name, tests) {
+      var div = document.createElement("div");
+      div.className = "suite";
+      div.innerHTML = '<div class="suite-title">' + name + '</div>';
+      tests.forEach(function (t) {
+        var passed = false;
+        var actual, error;
+        try {
+          actual = t.fn();
+          passed = t.check ? t.check(actual) : deepEqual(actual, t.expected);
+        } catch (e) {
+          error = e.message;
+        }
+
+        if (passed) totalPass++; else totalFail++;
+
+        var row = document.createElement("div");
+        row.className = "test " + (passed ? "pass" : "fail");
+        row.innerHTML =
+          '<span class="badge">' + (passed ? "PASS" : "FAIL") + '</span>' +
+          '<span>' + t.name +
+          (passed ? '' : ' <span class="detail">got: ' + JSON.stringify(actual) + (error ? ' err: ' + error : '') + '</span>') +
+          '</span>';
+        div.appendChild(row);
+      });
+      resultsEl.appendChild(div);
+    }
+
+    // ── parseSSHTarget ──
+
+    suite("parseSSHTarget", [
+      {
+        name: '"root@192.168.1.100" → { username: "root", host: "192.168.1.100", port: 22 }',
+        fn: function () { return parseSSHTarget("root@192.168.1.100"); },
+        expected: { username: "root", host: "192.168.1.100", port: 22 }
+      },
+      {
+        name: '"deploy@myserver.com:2222" → { username: "deploy", host: "myserver.com", port: 2222 }',
+        fn: function () { return parseSSHTarget("deploy@myserver.com:2222"); },
+        expected: { username: "deploy", host: "myserver.com", port: 2222 }
+      },
+      {
+        name: '"user@host:99999" → null (invalid port)',
+        fn: function () { return parseSSHTarget("user@host:99999"); },
+        expected: null
+      },
+      {
+        name: '"badhost" → null (no @)',
+        fn: function () { return parseSSHTarget("badhost"); },
+        expected: null
+      },
+      {
+        name: '"@host" → null (empty username)',
+        fn: function () { return parseSSHTarget("@host"); },
+        expected: null
+      },
+      {
+        name: '" root@host " → trims whitespace',
+        fn: function () { return parseSSHTarget("  root@host  "); },
+        expected: { username: "root", host: "host", port: 22 }
+      },
+      {
+        name: 'null → null',
+        fn: function () { return parseSSHTarget(null); },
+        expected: null
+      },
+      {
+        name: '"" → null',
+        fn: function () { return parseSSHTarget(""); },
+        expected: null
+      },
+      {
+        name: '"user@host:0" → null (port 0)',
+        fn: function () { return parseSSHTarget("user@host:0"); },
+        expected: null
+      },
+      {
+        name: '"_deploy@host:22" → valid (underscore-prefixed username)',
+        fn: function () { return parseSSHTarget("_deploy@host:22"); },
+        expected: { username: "_deploy", host: "host", port: 22 }
+      },
+      {
+        name: '"user@[::1]:22" → valid IPv6 host (brackets preserved)',
+        fn: function () { return parseSSHTarget("user@[::1]:22"); },
+        expected: { username: "user", host: "[::1]", port: 22 }
+      }
+    ]);
+
+    // ── renderMarkdown ──
+
+    suite("renderMarkdown", [
+      {
+        name: 'bold **text**',
+        fn: function () { return renderMarkdown("hello **world**"); },
+        check: function (r) { return r.indexOf("<strong>world</strong>") !== -1; }
+      },
+      {
+        name: 'italic *text*',
+        fn: function () { return renderMarkdown("hello *world*"); },
+        check: function (r) { return r.indexOf("<em>world</em>") !== -1; }
+      },
+      {
+        name: 'inline `code`',
+        fn: function () { return renderMarkdown("run `ls -la`"); },
+        check: function (r) { return r.indexOf("<code>ls -la</code>") !== -1; }
+      },
+      {
+        name: 'fenced code block',
+        fn: function () { return renderMarkdown("```bash\necho hi\n```"); },
+        check: function (r) { return r.indexOf("<pre><code") !== -1 && r.indexOf("echo hi") !== -1; }
+      },
+      {
+        name: 'link [text](url)',
+        fn: function () { return renderMarkdown("[click](https://example.com)"); },
+        check: function (r) { return r.indexOf('href="https://example.com"') !== -1; }
+      },
+      {
+        name: 'HTML entities escaped',
+        fn: function () { return renderMarkdown("<script>alert(1)</script>"); },
+        check: function (r) { return r.indexOf("<script>") === -1 && r.indexOf("&lt;script&gt;") !== -1; }
+      },
+      {
+        name: 'null/empty → ""',
+        fn: function () { return renderMarkdown(""); },
+        expected: ""
+      },
+      {
+        name: 'newlines become <br>',
+        fn: function () { return renderMarkdown("line1\nline2"); },
+        check: function (r) { return r.indexOf("line1<br>line2") !== -1; }
+      }
+    ]);
+
+    // ── timeAgo ──
+
+    suite("timeAgo", [
+      {
+        name: 'just now (10 seconds ago)',
+        fn: function () { return timeAgo(new Date(Date.now() - 10000).toISOString()); },
+        expected: "just now"
+      },
+      {
+        name: '5 minutes ago → "5m ago"',
+        fn: function () { return timeAgo(new Date(Date.now() - 300000).toISOString()); },
+        expected: "5m ago"
+      },
+      {
+        name: '2 hours ago → "2h ago"',
+        fn: function () { return timeAgo(new Date(Date.now() - 7200000).toISOString()); },
+        expected: "2h ago"
+      },
+      {
+        name: '3 days ago → "3d ago"',
+        fn: function () { return timeAgo(new Date(Date.now() - 259200000).toISOString()); },
+        expected: "3d ago"
+      },
+      {
+        name: 'empty string → ""',
+        fn: function () { return timeAgo(""); },
+        expected: ""
+      }
+    ]);
+
+    // ── Summary ──
+
+    var summaryEl = document.getElementById("summary");
+    var allPass = totalFail === 0;
+    summaryEl.className = "summary " + (allPass ? "all-pass" : "has-fail");
+    summaryEl.textContent = (allPass ? "All " : "") + totalPass + " passed, " + totalFail + " failed";
+  </script>
+</body>
+</html>

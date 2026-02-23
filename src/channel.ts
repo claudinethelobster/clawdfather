@@ -1,6 +1,6 @@
 import { getClawdfatherRuntime } from "./runtime";
 import { startWebServer, sendToSession } from "./web-server";
-import { handleClawdfatherInbound } from "./inbound";
+import { handleClawdfatherInbound, sanitizeAssistantText } from "./inbound";
 import { sessionStore } from "./sessions";
 import type { ClawdfatherConfig } from "./types";
 
@@ -52,12 +52,13 @@ export function createClawdfatherChannel(pluginConfig: ClawdfatherConfig, plugin
         threadId?: string;
         silent?: boolean;
       }) => {
-        // `to` format: "clawdfather:<sessionId>"
         const sessionId = params.to.replace(`${CHANNEL_ID}:`, "");
+        const cleaned = sanitizeAssistantText(params.text);
+        if (!cleaned) return { ok: true };
         sendToSession(sessionId, {
           type: "message",
           role: "assistant",
-          text: params.text,
+          text: cleaned,
         });
         return { ok: true };
       },

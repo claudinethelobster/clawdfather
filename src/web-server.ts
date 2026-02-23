@@ -3,6 +3,11 @@ import { readFileSync, existsSync } from "fs";
 import { join, extname } from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { sessionStore } from "./sessions";
+import { handleApiRequest } from "./api-router";
+import { hashToken } from "./crypto";
+import { query } from "./db";
+import { apiError } from "./api-response";
+import { startSessionCleanup } from "./routes/sessions";
 import type { ClawdfatherConfig } from "./types";
 
 const MIME: Record<string, string> = {
@@ -15,9 +20,6 @@ const MIME: Record<string, string> = {
 /** Map of sessionId → Set of connected WebSocket clients */
 const wsClients = new Map<string, Set<WebSocket>>();
 
-/**
- * Send a message to all WebSocket clients connected to a session.
- */
 export function sendToSession(sessionId: string, data: Record<string, unknown>): void {
   const clients = wsClients.get(sessionId);
   if (!clients) return;
@@ -29,9 +31,6 @@ export function sendToSession(sessionId: string, data: Record<string, unknown>):
   }
 }
 
-/**
- * Immediately close all WebSocket clients for a session and remove the map entry.
- */
 export function closeSessionClients(
   sessionId: string,
   code: number = 4001,
@@ -45,16 +44,12 @@ export function closeSessionClients(
   wsClients.delete(sessionId);
 }
 
-// Singleton state for the web server so multiple accounts don't cause EADDRINUSE
 let singletonServer: HttpServer | null = null;
 let singletonRefCount = 0;
 
-/** Compute the CORS origin value for a response. */
 function resolveAllowedOrigin(reqOrigin: string | undefined, config: ClawdfatherConfig): string | null {
   const allowed = config.allowedOrigins;
   if (!allowed || allowed.length === 0) {
-    // Default: same-origin only — reflect the request origin if it matches
-    // the configured webDomain, otherwise reject.
     if (!reqOrigin) return null;
     try {
       const url = new URL(reqOrigin);
@@ -69,10 +64,6 @@ function resolveAllowedOrigin(reqOrigin: string | undefined, config: Clawdfather
   return null;
 }
 
-/**
- * Get or create the singleton Clawdfather web server (HTTP + WebSocket).
- * Returns an object with a release() method for reference-counted shutdown.
- */
 export function startWebServer(
   config: ClawdfatherConfig,
   pluginRoot: string,
@@ -96,16 +87,18 @@ export function startWebServer(
   const port = config.webPort ?? 3000;
   const uiDir = join(pluginRoot, "ui");
 
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    // CORS headers — configurable allowlist, same-origin by default
+  startSessionCleanup();
+
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const reqOrigin = req.headers.origin;
     const allowedOrigin = resolveAllowedOrigin(reqOrigin, config);
     if (allowedOrigin) {
       res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
       res.setHeader("Vary", "Origin");
     }
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -113,73 +106,84 @@ export function startWebServer(
       return;
     }
 
-    const url = req.url ?? "/";
-
-    // API: version
-    if (url === "/api/version") {
-      let commitHash = "unknown";
-      try {
-        const { execSync } = require("child_process");
-        commitHash = execSync("git rev-parse --short HEAD", { cwd: pluginRoot, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
-      } catch {}
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ version: "0.1.0", commit: commitHash }));
-      return;
-    }
-
-    // API: session info
-    if (url.startsWith("/api/session/")) {
-      const sessionId = url.replace("/api/session/", "").split("?")[0];
-      const session = sessionStore.get(sessionId);
-      res.setHeader("Content-Type", "application/json");
-      if (session) {
-        sessionStore.touch(session.sessionId);
-        res.writeHead(200);
-        res.end(JSON.stringify({
-          sessionId: session.sessionId,
-          targetHost: session.targetHost,
-          targetUser: session.targetUser,
-          targetPort: session.targetPort,
-          connectedAt: session.connectedAt,
-          keyFingerprint: session.keyFingerprint,
-        }));
-      } else {
-        res.writeHead(404);
-        res.end(JSON.stringify({ error: "Session not found or expired" }));
-      }
-      return;
-    }
-
-    // Static files
-    let filePath: string;
-    if (url === "/" || url === "/index.html") {
-      filePath = join(uiDir, "index.html");
-    } else {
-      // Sanitize: only allow files in uiDir
-      const clean = url.split("?")[0].replace(/\.\./g, "");
-      filePath = join(uiDir, clean);
-    }
-
-    if (!filePath.startsWith(uiDir)) {
-      res.writeHead(403);
-      res.end("Forbidden");
-      return;
-    }
-
-    if (!existsSync(filePath)) {
-      // SPA fallback
-      filePath = join(uiDir, "index.html");
-    }
+    const rawUrl = req.url ?? "/";
+    const urlPath = rawUrl.split("?")[0];
 
     try {
-      const content = readFileSync(filePath);
-      const ext = extname(filePath);
-      res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
-      res.end(content);
-    } catch {
-      res.writeHead(500);
-      res.end("Internal Server Error");
+      // Route API v1 and /health through the API router
+      if (urlPath.startsWith("/api/v1/") || urlPath === "/health") {
+        return await handleApiRequest(req, res, config);
+      }
+
+      // Legacy: /api/version
+      if (urlPath === "/api/version") {
+        let commitHash = "unknown";
+        try {
+          const { execSync } = require("child_process");
+          commitHash = execSync("git rev-parse --short HEAD", { cwd: pluginRoot, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+        } catch {}
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(200);
+        res.end(JSON.stringify({ version: "0.2.0", commit: commitHash }));
+        return;
+      }
+
+      // Legacy: /api/session/:id
+      if (urlPath.startsWith("/api/session/")) {
+        const sessionId = urlPath.replace("/api/session/", "");
+        const session = sessionStore.get(sessionId);
+        res.setHeader("Content-Type", "application/json");
+        if (session) {
+          sessionStore.touch(session.sessionId);
+          res.writeHead(200);
+          res.end(JSON.stringify({
+            sessionId: session.sessionId,
+            targetHost: session.targetHost,
+            targetUser: session.targetUser,
+            targetPort: session.targetPort,
+            connectedAt: session.connectedAt,
+            keyFingerprint: session.keyFingerprint,
+          }));
+        } else {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Session not found or expired" }));
+        }
+        return;
+      }
+
+      // Static files
+      let filePath: string;
+      if (urlPath === "/" || urlPath === "/index.html") {
+        filePath = join(uiDir, "index.html");
+      } else {
+        const clean = urlPath.replace(/\.\./g, "");
+        filePath = join(uiDir, clean);
+      }
+
+      if (!filePath.startsWith(uiDir)) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+      }
+
+      if (!existsSync(filePath)) {
+        filePath = join(uiDir, "index.html");
+      }
+
+      try {
+        const content = readFileSync(filePath);
+        const ext = extname(filePath);
+        res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
+        res.end(content);
+      } catch {
+        res.writeHead(500);
+        res.end("Internal Server Error");
+      }
+    } catch (err) {
+      console.error("[clawdfather] Unhandled request error:", (err as Error).message);
+      if (!res.headersSent) {
+        apiError(res, 500, "internal_error", "An unexpected error occurred.");
+      }
     }
   });
 
@@ -188,20 +192,21 @@ export function startWebServer(
 
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     const wsOrigin = req.headers.origin;
-    // Explicit WS origin enforcement: require an Origin header and validate
-    // against the same allowlist policy used for HTTP CORS.
-    if (!wsOrigin) {
-      ws.close(4003, "Origin required");
-      return;
-    }
-    const allowed = resolveAllowedOrigin(wsOrigin, config);
-    if (!allowed) {
-      ws.close(4003, "Origin not allowed");
-      return;
+    if (wsOrigin) {
+      const allowed = resolveAllowedOrigin(wsOrigin, config);
+      if (!allowed) {
+        ws.close(4003, "Origin not allowed");
+        return;
+      }
     }
 
     let authenticatedSessionId: string | null = null;
     let keyFingerprint = "unknown";
+
+    // Parse URL for /ws/sessions/:sessionId path
+    const wsUrl = new URL(req.url ?? "/", `http://${req.headers.host}`);
+    const wsSessionMatch = wsUrl.pathname.match(/\/ws\/sessions\/([^/]+)/);
+    const urlSessionId = wsSessionMatch?.[1] ?? null;
 
     ws.on("message", async (raw: Buffer) => {
       let msg: Record<string, unknown>;
@@ -213,37 +218,89 @@ export function startWebServer(
       }
 
       if (msg.type === "auth") {
-        const sessionId = msg.sessionId as string;
-        if (!sessionId) {
-          ws.send(JSON.stringify({ type: "error", message: "Missing sessionId" }));
+        const token = msg.token as string | undefined;
+        const sessionId = (msg.sessionId ?? msg.session_id) as string | undefined;
+
+        if (token) {
+          const tokenH = hashToken(token);
+          try {
+            const result = await query(
+              `SELECT s.account_id FROM app_sessions s
+               JOIN accounts a ON a.id = s.account_id
+               WHERE s.token_hash = $1 AND s.expires_at > NOW() AND s.revoked_at IS NULL AND a.is_active = TRUE`,
+              [tokenH],
+            );
+            if (result.rows.length === 0) {
+              ws.send(JSON.stringify({ type: "error", message: "Invalid or expired token" }));
+              return;
+            }
+            const accountId = result.rows[0].account_id;
+
+            const targetSessionId = sessionId ?? urlSessionId;
+            if (targetSessionId) {
+              const sessResult = await query(
+                `SELECT id FROM session_leases WHERE id = $1 AND account_id = $2 AND status IN ('pending','active')`,
+                [targetSessionId, accountId],
+              );
+              if (sessResult.rows.length === 0) {
+                ws.send(JSON.stringify({ type: "error", message: "Session not found or not accessible" }));
+                ws.close(4004, "Session not found");
+                return;
+              }
+              authenticatedSessionId = targetSessionId;
+              const memSession = sessionStore.get(targetSessionId);
+              if (memSession) keyFingerprint = memSession.keyFingerprint;
+            }
+          } catch {
+            ws.send(JSON.stringify({ type: "error", message: "Auth verification failed" }));
+            return;
+          }
+        } else if (sessionId) {
+          const session = sessionStore.get(sessionId);
+          if (!session) {
+            ws.send(JSON.stringify({ type: "error", message: "Session not found or expired" }));
+            ws.close(4004, "Session not found");
+            return;
+          }
+          authenticatedSessionId = sessionId;
+          keyFingerprint = session.keyFingerprint;
+        } else {
+          ws.send(JSON.stringify({ type: "error", message: "Missing token or sessionId" }));
           return;
         }
 
-        const session = sessionStore.get(sessionId);
-        if (!session) {
-          ws.send(JSON.stringify({ type: "error", message: "Session not found or expired" }));
-          return;
+        if (authenticatedSessionId) {
+          if (!wsClients.has(authenticatedSessionId)) {
+            wsClients.set(authenticatedSessionId, new Set());
+          }
+          wsClients.get(authenticatedSessionId)!.add(ws);
+
+          const session = sessionStore.get(authenticatedSessionId);
+          ws.send(JSON.stringify({
+            type: "session",
+            session_id: authenticatedSessionId,
+            connection: session ? {
+              label: `${session.targetUser}@${session.targetHost}`,
+              host: session.targetHost,
+              username: session.targetUser,
+            } : undefined,
+          }));
+        } else {
+          ws.send(JSON.stringify({ type: "auth_ok" }));
         }
 
-        authenticatedSessionId = sessionId;
-        keyFingerprint = session.keyFingerprint;
+        return;
+      }
 
-        // Register this WS connection for the session
-        if (!wsClients.has(sessionId)) {
-          wsClients.set(sessionId, new Set());
+      if (msg.type === "heartbeat") {
+        if (authenticatedSessionId) {
+          sessionStore.touch(authenticatedSessionId);
+          query(
+            `UPDATE session_leases SET last_heartbeat_at = NOW() WHERE id = $1 AND status = 'active'`,
+            [authenticatedSessionId],
+          ).catch(() => {});
         }
-        wsClients.get(sessionId)!.add(ws);
-
-        // Send session info back (controlPath kept server-side only)
-        ws.send(JSON.stringify({
-          type: "session",
-          sessionId: session.sessionId,
-          targetUser: session.targetUser,
-          targetHost: session.targetHost,
-          targetPort: session.targetPort,
-          keyFingerprint: session.keyFingerprint,
-        }));
-
+        ws.send(JSON.stringify({ type: "heartbeat_ack", server_time: new Date().toISOString() }));
         return;
       }
 
@@ -253,7 +310,6 @@ export function startWebServer(
           return;
         }
 
-        // Re-validate session liveness on every message
         const liveSession = sessionStore.get(authenticatedSessionId);
         if (!liveSession) {
           ws.send(JSON.stringify({ type: "error", message: "Session expired or invalidated" }));
@@ -265,13 +321,12 @@ export function startWebServer(
         const text = (msg.text as string)?.trim();
         if (!text) return;
 
-        // Dispatch through OpenClaw channel system
         try {
           sendToSession(authenticatedSessionId, { type: "status", status: "thinking" });
           await onInbound(authenticatedSessionId, text, keyFingerprint);
           sendToSession(authenticatedSessionId, { type: "status", status: "done" });
-        } catch (err: any) {
-          ws.send(JSON.stringify({ type: "error", message: err.message }));
+        } catch (err: unknown) {
+          ws.send(JSON.stringify({ type: "error", message: (err as Error).message }));
           sendToSession(authenticatedSessionId, { type: "status", status: "done" });
         }
 
